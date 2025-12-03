@@ -1,7 +1,7 @@
 """
 가전제품 판매 시계열 예측 분석 프로그램
-- 머신러닝 모델: ARIMA, Prophet, Random Forest
-- 딥러닝 모델: LSTM, GRU
+- 머신러닝 모델: K-최근접 이웃(KNN) 회귀
+- 딥러닝 모델: RNN (Recurrent Neural Network)
 - 성능 비교 및 시각화
 """
 
@@ -18,35 +18,22 @@ plt.rcParams['font.family'] = 'Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] = False
 
 # 머신러닝 라이브러리
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, mean_absolute_percentage_error
-
-# 시계열 분석 라이브러리
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 # 딥러닝 라이브러리
 try:
     import tensorflow as tf
     from tensorflow import keras
     from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, GRU, Dense, Dropout
+    from tensorflow.keras.layers import SimpleRNN, Dense, Dropout
     from tensorflow.keras.callbacks import EarlyStopping
     DEEP_LEARNING_AVAILABLE = True
 except ImportError:
     print("경고: TensorFlow가 설치되지 않았습니다. 딥러닝 모델은 사용할 수 없습니다.")
     print("설치 방법: pip install tensorflow")
     DEEP_LEARNING_AVAILABLE = False
-
-# Prophet 라이브러리
-try:
-    from prophet import Prophet
-    PROPHET_AVAILABLE = True
-except ImportError:
-    print("경고: Prophet이 설치되지 않았습니다. Prophet 모델은 사용할 수 없습니다.")
-    print("설치 방법: pip install prophet")
-    PROPHET_AVAILABLE = False
 
 
 class ApplianceSalesPredictor:
@@ -202,155 +189,89 @@ class ApplianceSalesPredictor:
         print(f"{'='*60}")
 
     # ========================================================================
-    # 머신러닝 모델들
+    # 머신러닝 모델: K-최근접 이웃(KNN) 회귀
     # ========================================================================
 
-    def train_arima(self, order=(2, 1, 2)):
-        """ARIMA 모델 학습 및 예측"""
+    def train_knn(self, n_neighbors=5):
+        """K-최근접 이웃(KNN) 회귀 모델 학습 및 예측"""
         print("\n" + "="*80)
-        print("[머신러닝 모델 1] ARIMA 모델")
+        print("[머신러닝 모델] K-최근접 이웃(KNN) 회귀")
         print("="*80)
 
-        try:
-            # ARIMA 모델 학습
-            model = ARIMA(self.train_data['매출금액'], order=order)
-            fitted_model = model.fit()
+        # 피처 준비 - 과거 N일의 매출 데이터를 피처로 사용
+        lookback = 7  # 과거 7일 데이터 사용
 
-            # 예측
-            forecast_steps = len(self.test_data)
-            predictions = fitted_model.forecast(steps=forecast_steps)
+        # 시계열 데이터를 지도학습 형태로 변환
+        X_train_list = []
+        y_train_list = []
 
-            # 성능 평가
-            y_true = self.test_data['매출금액'].values
-            metrics = self.calculate_metrics(y_true, predictions, 'ARIMA')
-            self.print_metrics(metrics, f'ARIMA{order}')
+        # 학습 데이터 생성
+        sales_values = self.daily_sales['매출금액'].values
+        for i in range(lookback, len(self.train_data)):
+            X_train_list.append(sales_values[i-lookback:i])
+            y_train_list.append(sales_values[i])
 
-            return predictions, metrics
+        X_train = np.array(X_train_list)
+        y_train = np.array(y_train_list)
 
-        except Exception as e:
-            print(f"ARIMA 모델 학습 중 오류 발생: {e}")
-            return None, None
+        # 테스트 데이터 생성
+        X_test_list = []
+        y_test_list = []
+        test_start_idx = len(self.train_data)
 
-    def train_prophet(self):
-        """Prophet 모델 학습 및 예측"""
-        if not PROPHET_AVAILABLE:
-            print("\nProphet 모델을 사용할 수 없습니다.")
-            return None, None
+        for i in range(test_start_idx, len(self.daily_sales)):
+            if i >= lookback:
+                X_test_list.append(sales_values[i-lookback:i])
+                y_test_list.append(sales_values[i])
 
-        print("\n" + "="*80)
-        print("[머신러닝 모델 2] Prophet 모델")
-        print("="*80)
+        X_test = np.array(X_test_list)
+        y_test = np.array(y_test_list)
 
-        try:
-            # Prophet 형식으로 데이터 변환
-            train_prophet = self.train_data[['날짜', '매출금액']].copy()
-            train_prophet.columns = ['ds', 'y']
+        print(f"\n학습 데이터 크기: {X_train.shape}")
+        print(f"테스트 데이터 크기: {X_test.shape}")
 
-            # 모델 학습
-            model = Prophet(
-                daily_seasonality=True,
-                weekly_seasonality=True,
-                yearly_seasonality=False,
-                changepoint_prior_scale=0.05
-            )
-            model.fit(train_prophet)
+        # 데이터 정규화 (KNN은 거리 기반이므로 스케일링 필수)
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
 
-            # 미래 날짜 생성 및 예측
-            future = model.make_future_dataframe(periods=len(self.test_data))
-            forecast = model.predict(future)
+        # 최적의 K 값 찾기
+        print(f"\n[다양한 K 값으로 모델 성능 테스트]")
+        best_k = n_neighbors
+        best_score = -np.inf
+        k_values = [3, 5, 7, 9, 11]
 
-            # 테스트 기간 예측값 추출
-            predictions = forecast['yhat'].iloc[-len(self.test_data):].values
+        for k in k_values:
+            temp_model = KNeighborsRegressor(n_neighbors=k)
+            temp_model.fit(X_train_scaled, y_train)
+            score = temp_model.score(X_train_scaled, y_train)
+            print(f"K={k}: 학습 R² = {score:.4f}")
+            if score > best_score:
+                best_score = score
+                best_k = k
 
-            # 성능 평가
-            y_true = self.test_data['매출금액'].values
-            metrics = self.calculate_metrics(y_true, predictions, 'Prophet')
-            self.print_metrics(metrics, 'Prophet')
+        print(f"\n✓ 최적의 K 값: {best_k}")
 
-            return predictions, metrics
-
-        except Exception as e:
-            print(f"Prophet 모델 학습 중 오류 발생: {e}")
-            return None, None
-
-    def train_random_forest(self):
-        """Random Forest 모델 학습 및 예측"""
-        print("\n" + "="*80)
-        print("[머신러닝 모델 3] Random Forest 모델")
-        print("="*80)
-
-        # 피처 준비
-        features = ['요일', '일', '주말여부']
-
-        X_train = self.train_data[features].values
-        y_train = self.train_data['매출금액'].values
-        X_test = self.test_data[features].values
-        y_test = self.test_data['매출금액'].values
-
-        # 모델 학습
-        model = RandomForestRegressor(
-            n_estimators=200,
-            max_depth=10,
-            min_samples_split=5,
-            min_samples_leaf=2,
-            random_state=42,
-            n_jobs=-1
+        # 최적 K로 최종 모델 학습
+        model = KNeighborsRegressor(
+            n_neighbors=best_k,
+            weights='distance',  # 거리에 반비례하는 가중치 사용
+            algorithm='auto',
+            metric='euclidean'
         )
-        model.fit(X_train, y_train)
+        model.fit(X_train_scaled, y_train)
 
         # 예측
-        predictions = model.predict(X_test)
-
-        # 피처 중요도
-        feature_importance = pd.DataFrame({
-            'feature': features,
-            'importance': model.feature_importances_
-        }).sort_values('importance', ascending=False)
-
-        print("\n[피처 중요도]")
-        print(feature_importance)
+        predictions = model.predict(X_test_scaled)
 
         # 성능 평가
-        metrics = self.calculate_metrics(y_test, predictions, 'RandomForest')
-        self.print_metrics(metrics, 'Random Forest')
-
-        return predictions, metrics
-
-    def train_gradient_boosting(self):
-        """Gradient Boosting 모델 학습 및 예측"""
-        print("\n" + "="*80)
-        print("[머신러닝 모델 4] Gradient Boosting 모델")
-        print("="*80)
-
-        # 피처 준비
-        features = ['요일', '일', '주말여부']
-
-        X_train = self.train_data[features].values
-        y_train = self.train_data['매출금액'].values
-        X_test = self.test_data[features].values
-        y_test = self.test_data['매출금액'].values
-
-        # 모델 학습
-        model = GradientBoostingRegressor(
-            n_estimators=200,
-            learning_rate=0.1,
-            max_depth=5,
-            min_samples_split=5,
-            random_state=42
-        )
-        model.fit(X_train, y_train)
-
-        # 예측
-        predictions = model.predict(X_test)
-
-        # 성능 평가
-        metrics = self.calculate_metrics(y_test, predictions, 'GradientBoosting')
-        self.print_metrics(metrics, 'Gradient Boosting')
+        metrics = self.calculate_metrics(y_test, predictions, 'KNN')
+        self.print_metrics(metrics, f'K-최근접 이웃 (K={best_k})')
 
         return predictions, metrics
 
     # ========================================================================
-    # 딥러닝 모델들
+    # 딥러닝 모델: RNN (Recurrent Neural Network)
     # ========================================================================
 
     def create_sequences(self, data, seq_length):
@@ -361,14 +282,14 @@ class ApplianceSalesPredictor:
             y.append(data[i+seq_length])
         return np.array(X), np.array(y)
 
-    def train_lstm(self, seq_length=7, epochs=100, batch_size=8):
-        """LSTM 모델 학습 및 예측"""
+    def train_rnn(self, seq_length=7, epochs=150, batch_size=8):
+        """RNN(Recurrent Neural Network) 모델 학습 및 예측"""
         if not DEEP_LEARNING_AVAILABLE:
             print("\n딥러닝 모델을 사용할 수 없습니다.")
             return None, None
 
         print("\n" + "="*80)
-        print("[딥러닝 모델 1] LSTM 모델")
+        print("[딥러닝 모델] RNN (Recurrent Neural Network)")
         print("="*80)
 
         # 데이터 정규화
@@ -386,112 +307,100 @@ class ApplianceSalesPredictor:
         print(f"\n학습 데이터 shape: {X_train.shape}")
         print(f"테스트 데이터 shape: {X_test.shape}")
 
-        # LSTM 모델 구축
+        # RNN 모델 구축 (2층 구조)
+        print("\n[RNN 모델 아키텍처]")
         model = Sequential([
-            LSTM(64, activation='relu', return_sequences=True, input_shape=(seq_length, 1)),
+            # 첫 번째 RNN 레이어 (return_sequences=True로 다음 레이어로 시퀀스 전달)
+            SimpleRNN(128, activation='tanh', return_sequences=True,
+                     input_shape=(seq_length, 1)),
+            Dropout(0.3),
+
+            # 두 번째 RNN 레이어
+            SimpleRNN(64, activation='tanh', return_sequences=True),
+            Dropout(0.3),
+
+            # 세 번째 RNN 레이어
+            SimpleRNN(32, activation='tanh'),
             Dropout(0.2),
-            LSTM(32, activation='relu'),
-            Dropout(0.2),
+
+            # 완전 연결 레이어
             Dense(16, activation='relu'),
             Dense(1)
         ])
 
-        model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+        # 모델 컴파일
+        model.compile(
+            optimizer='adam',
+            loss='mse',
+            metrics=['mae']
+        )
+
+        # 모델 구조 출력
+        print("\n[모델 요약]")
+        model.summary()
 
         # 조기 종료 설정
-        early_stop = EarlyStopping(monitor='loss', patience=15, restore_best_weights=True)
+        early_stop = EarlyStopping(
+            monitor='loss',
+            patience=20,
+            restore_best_weights=True,
+            verbose=1
+        )
 
         # 모델 학습
         print("\n[모델 학습 중...]")
+        print(f"Epochs: {epochs}, Batch Size: {batch_size}")
         history = model.fit(
             X_train, y_train,
             epochs=epochs,
             batch_size=batch_size,
             callbacks=[early_stop],
-            verbose=0
+            verbose=1
         )
 
-        print(f"✓ 학습 완료 (Epochs: {len(history.history['loss'])})")
+        print(f"\n✓ 학습 완료 (실제 학습 Epochs: {len(history.history['loss'])})")
 
         # 예측
+        print("\n[테스트 데이터 예측 중...]")
         predictions_scaled = model.predict(X_test, verbose=0)
         predictions = self.scaler.inverse_transform(predictions_scaled).flatten()
         y_test_original = self.scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
 
         # 성능 평가
-        metrics = self.calculate_metrics(y_test_original, predictions, 'LSTM')
-        self.print_metrics(metrics, f'LSTM (seq_length={seq_length})')
+        metrics = self.calculate_metrics(y_test_original, predictions, 'RNN')
+        self.print_metrics(metrics, f'RNN (seq_length={seq_length})')
 
         # 결과 저장
-        self.results['LSTM']['history'] = history.history
+        self.results['RNN']['history'] = history.history
+
+        # 학습 곡선 시각화
+        self.plot_training_history(history, 'RNN')
 
         return predictions, metrics
 
-    def train_gru(self, seq_length=7, epochs=100, batch_size=8):
-        """GRU 모델 학습 및 예측"""
-        if not DEEP_LEARNING_AVAILABLE:
-            print("\n딥러닝 모델을 사용할 수 없습니다.")
-            return None, None
+    def plot_training_history(self, history, model_name):
+        """학습 과정 시각화"""
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-        print("\n" + "="*80)
-        print("[딥러닝 모델 2] GRU 모델")
-        print("="*80)
+        # Loss 그래프
+        axes[0].plot(history.history['loss'], linewidth=2, color='#E63946')
+        axes[0].set_title(f'{model_name} 모델 학습 손실(Loss)', fontsize=12, fontweight='bold')
+        axes[0].set_xlabel('Epoch', fontsize=10)
+        axes[0].set_ylabel('Loss (MSE)', fontsize=10)
+        axes[0].grid(True, alpha=0.3)
 
-        # 데이터 정규화
-        sales_data = self.daily_sales['매출금액'].values.reshape(-1, 1)
-        scaled_data = self.scaler.fit_transform(sales_data)
+        # MAE 그래프
+        axes[1].plot(history.history['mae'], linewidth=2, color='#2A9D8F')
+        axes[1].set_title(f'{model_name} 모델 학습 MAE', fontsize=12, fontweight='bold')
+        axes[1].set_xlabel('Epoch', fontsize=10)
+        axes[1].set_ylabel('MAE', fontsize=10)
+        axes[1].grid(True, alpha=0.3)
 
-        # 시퀀스 생성
-        X, y = self.create_sequences(scaled_data, seq_length)
+        plt.tight_layout()
+        plt.savefig(f'00_{model_name}_학습_곡선.png', dpi=300, bbox_inches='tight')
+        plt.show()
 
-        # 학습/테스트 분리
-        split_idx = len(self.train_data) - seq_length
-        X_train, y_train = X[:split_idx], y[:split_idx]
-        X_test, y_test = X[split_idx:], y[split_idx:]
-
-        print(f"\n학습 데이터 shape: {X_train.shape}")
-        print(f"테스트 데이터 shape: {X_test.shape}")
-
-        # GRU 모델 구축
-        model = Sequential([
-            GRU(64, activation='relu', return_sequences=True, input_shape=(seq_length, 1)),
-            Dropout(0.2),
-            GRU(32, activation='relu'),
-            Dropout(0.2),
-            Dense(16, activation='relu'),
-            Dense(1)
-        ])
-
-        model.compile(optimizer='adam', loss='mse', metrics=['mae'])
-
-        # 조기 종료 설정
-        early_stop = EarlyStopping(monitor='loss', patience=15, restore_best_weights=True)
-
-        # 모델 학습
-        print("\n[모델 학습 중...]")
-        history = model.fit(
-            X_train, y_train,
-            epochs=epochs,
-            batch_size=batch_size,
-            callbacks=[early_stop],
-            verbose=0
-        )
-
-        print(f"✓ 학습 완료 (Epochs: {len(history.history['loss'])})")
-
-        # 예측
-        predictions_scaled = model.predict(X_test, verbose=0)
-        predictions = self.scaler.inverse_transform(predictions_scaled).flatten()
-        y_test_original = self.scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
-
-        # 성능 평가
-        metrics = self.calculate_metrics(y_test_original, predictions, 'GRU')
-        self.print_metrics(metrics, f'GRU (seq_length={seq_length})')
-
-        # 결과 저장
-        self.results['GRU']['history'] = history.history
-
-        return predictions, metrics
+        print(f"✓ 학습 곡선 저장: 00_{model_name}_학습_곡선.png")
 
     # ========================================================================
     # 결과 비교 및 시각화
@@ -674,49 +583,67 @@ class ApplianceSalesPredictor:
         report.append("4. 모델별 특징 및 분석")
         report.append("-"*80)
 
-        if 'ARIMA' in self.results:
-            report.append("\n[ARIMA]")
-            report.append("- 전통적인 시계열 분석 기법")
-            report.append("- 선형 추세와 계절성 패턴 포착에 강점")
-            report.append("- 단기 예측에 효과적")
+        if 'KNN' in self.results:
+            report.append("\n[K-최근접 이웃(KNN) 회귀]")
+            report.append("- 거리 기반 비모수적 머신러닝 기법")
+            report.append("- 과거 유사 패턴을 찾아 예측 수행")
+            report.append("- 특징:")
+            report.append("  * 직관적이고 이해하기 쉬운 알고리즘")
+            report.append("  * 학습 시간이 짧고 구현이 간단함")
+            report.append("  * 거리 기반이므로 정규화(스케일링) 필수")
+            report.append("  * K값 선택이 성능에 큰 영향")
+            report.append("- 장점: 비선형 패턴 포착, 빠른 학습")
+            report.append("- 단점: 예측 시간이 상대적으로 느림, 차원의 저주")
 
-        if 'Prophet' in self.results:
-            report.append("\n[Prophet]")
-            report.append("- Facebook 개발 시계열 예측 라이브러리")
-            report.append("- 추세, 계절성, 휴일 효과 자동 감지")
-            report.append("- 결측치와 이상치에 강건함")
-
-        if 'RandomForest' in self.results:
-            report.append("\n[Random Forest]")
-            report.append("- 앙상블 머신러닝 기법")
-            report.append("- 비선형 패턴 학습 가능")
-            report.append("- 피처 중요도 분석 가능")
-
-        if 'GradientBoosting' in self.results:
-            report.append("\n[Gradient Boosting]")
-            report.append("- 부스팅 기반 앙상블 기법")
-            report.append("- 순차적 학습으로 오차 최소화")
-            report.append("- 복잡한 패턴 학습 가능")
-
-        if 'LSTM' in self.results:
-            report.append("\n[LSTM]")
-            report.append("- 장단기 메모리 신경망")
-            report.append("- 장기 의존성 패턴 학습 가능")
-            report.append("- 복잡한 시계열 패턴 포착")
-
-        if 'GRU' in self.results:
-            report.append("\n[GRU]")
-            report.append("- LSTM의 경량화 버전")
-            report.append("- 학습 속도가 빠름")
-            report.append("- LSTM과 유사한 성능")
+        if 'RNN' in self.results:
+            report.append("\n[RNN (Recurrent Neural Network - 순환 신경망)]")
+            report.append("- 시퀀스 데이터 처리에 특화된 딥러닝 기법")
+            report.append("- 이전 시점의 정보를 순환적으로 전달하여 시계열 패턴 학습")
+            report.append("- 특징:")
+            report.append("  * 시간적 의존성(temporal dependency) 학습 가능")
+            report.append("  * 가변 길이 시퀀스 처리 가능")
+            report.append("  * 은닉 상태(hidden state)로 과거 정보 기억")
+            report.append("  * tanh 활성화 함수로 비선형성 확보")
+            report.append("- 장점: 복잡한 시계열 패턴 포착, 자동 피처 추출")
+            report.append("- 단점: 학습 시간이 길고, 하이퍼파라미터 튜닝 필요")
+            report.append("- 구조: 3층 RNN (128→64→32 유닛) + Dropout + Dense 레이어")
 
         report.append("\n" + "-"*80)
-        report.append("5. 권장사항")
+        report.append("5. 머신러닝 vs 딥러닝 비교 분석")
         report.append("-"*80)
-        report.append(f"\n✓ 실무 적용 권장 모델: {best_model['모델']}")
-        report.append("✓ 정기적인 모델 재학습 필요 (신규 데이터 반영)")
-        report.append("✓ 외부 변수(프로모션, 계절성 등) 추가 고려")
-        report.append("✓ 앙상블 기법으로 여러 모델 결합 검토")
+        report.append("\n[머신러닝: KNN]")
+        report.append("✓ 학습 속도: 매우 빠름")
+        report.append("✓ 해석 가능성: 높음 (최근접 이웃 확인 가능)")
+        report.append("✓ 데이터 요구량: 상대적으로 적음")
+        report.append("✓ 적용 난이도: 쉬움")
+
+        report.append("\n[딥러닝: RNN]")
+        report.append("✓ 학습 속도: 느림 (에폭 반복 필요)")
+        report.append("✓ 해석 가능성: 낮음 (블랙박스 모델)")
+        report.append("✓ 데이터 요구량: 많음")
+        report.append("✓ 복잡도: 높음 (신경망 구조 설계 필요)")
+        report.append("✓ 성능: 복잡한 패턴에서 우수")
+
+        report.append("\n" + "-"*80)
+        report.append("6. 권장사항 및 결론")
+        report.append("-"*80)
+        report.append(f"\n🏆 최고 성능 모델: {best_model['모델']}")
+
+        if len(self.results) == 2:
+            report.append("\n[모델 선택 가이드]")
+            if best_model['모델'] == 'KNN':
+                report.append("✓ KNN이 더 우수한 성능 → 빠른 학습과 해석성이 중요한 경우 추천")
+                report.append("✓ 실시간 예측이 필요하거나 간단한 패턴의 경우 KNN 활용")
+            else:
+                report.append("✓ RNN이 더 우수한 성능 → 복잡한 시계열 패턴 존재")
+                report.append("✓ 장기 예측이나 정확도가 최우선인 경우 RNN 활용")
+
+        report.append("\n[향후 개선 방향]")
+        report.append("✓ 정기적인 모델 재학습 (신규 데이터 반영)")
+        report.append("✓ 외부 변수 추가 (프로모션, 공휴일, 날씨 등)")
+        report.append("✓ 하이퍼파라미터 튜닝으로 성능 최적화")
+        report.append("✓ 앙상블 기법 적용 (KNN + RNN 결합)")
+        report.append("✓ 다양한 시계열 길이(lookback) 테스트")
 
         report.append("\n" + "="*80)
         report.append(f"리포트 생성 일시: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -750,24 +677,25 @@ class ApplianceSalesPredictor:
         # 2. 데이터 분리
         self.split_data(train_ratio=0.8)
 
-        # 3. 머신러닝 모델 학습
+        # 3. 머신러닝 모델 학습 (K-최근접 이웃)
         print("\n" + "█"*80)
-        print("█" + " "*25 + "머신러닝 모델 학습 시작" + " "*25 + "█")
+        print("█" + " "*20 + "머신러닝 모델 학습: K-최근접 이웃" + " "*21 + "█")
         print("█"*80)
 
-        self.train_arima()
-        self.train_prophet()
-        self.train_random_forest()
-        self.train_gradient_boosting()
+        self.train_knn()
 
-        # 4. 딥러닝 모델 학습
+        # 4. 딥러닝 모델 학습 (RNN)
         if DEEP_LEARNING_AVAILABLE:
             print("\n" + "█"*80)
-            print("█" + " "*26 + "딥러닝 모델 학습 시작" + " "*26 + "█")
+            print("█" + " "*22 + "딥러닝 모델 학습: RNN (순환신경망)" + " "*21 + "█")
             print("█"*80)
 
-            self.train_lstm(seq_length=7, epochs=100)
-            self.train_gru(seq_length=7, epochs=100)
+            self.train_rnn(seq_length=7, epochs=150)
+        else:
+            print("\n" + "⚠"*40)
+            print("경고: TensorFlow가 설치되지 않아 딥러닝 모델을 사용할 수 없습니다.")
+            print("머신러닝 모델(KNN)만으로 분석을 진행합니다.")
+            print("⚠"*40)
 
         # 5. 결과 비교
         comparison_df = self.compare_all_models()
@@ -783,6 +711,8 @@ class ApplianceSalesPredictor:
         print("█" + " "*28 + "분석 완료!" + " "*35 + "█")
         print("█"*80)
         print("\n생성된 파일:")
+        if DEEP_LEARNING_AVAILABLE:
+            print("  - 00_RNN_학습_곡선.png")
         print("  - 01_데이터_시각화.png")
         print("  - 02_모델_예측_비교.png")
         print("  - 03_성능_지표_비교.png")
@@ -796,7 +726,7 @@ class ApplianceSalesPredictor:
 
 if __name__ == "__main__":
     # CSV 파일 경로 설정
-    csv_file = "card_gyeonggi_202503 - 복사본.csv"
+    csv_file = "card_gyeonggi_202503.csv"
 
     # 분석 시스템 초기화 및 실행
     predictor = ApplianceSalesPredictor(csv_file)
